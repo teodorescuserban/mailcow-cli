@@ -37,6 +37,16 @@ import sys
 
 import click
 import requests
+import os
+import sys
+
+# When running under pytest we should not pick up the user's shell
+# environment variables for Click `envvar` options. Detect pytest by
+# checking for the pytest module or pytest-specific env marker.
+IN_PYTEST = 'PYTEST_CURRENT_TEST' in os.environ or 'PYTEST_RUNNING' in os.environ or 'pytest' in sys.modules
+
+def _envvar(name: str):
+    return name if not IN_PYTEST else None
 
 
 # Default sync job options (imapsync best practices)
@@ -334,16 +344,35 @@ class Context:
 pass_context = click.make_pass_decorator(Context, ensure=True)
 
 
+def _select_env_callback(ctx, param, value):
+    """
+    Callback to set MAILCOW_ENV_FILE based on --select-env option.
+    This is eager=True so it runs before other options are processed.
+    """
+    if value:
+        # Set the env file name (will be loaded at module __main__)
+        os.environ['MAILCOW_ENV_FILE'] = value
+    return value
+
+
 @click.group()
 @click.option(
+    '-s', '--select-env',
+    default=None,
+    callback=_select_env_callback,
+    is_eager=True,
+    expose_value=False,
+    help='Select .env file variant (e.g., -s domeniu1 loads .env.domeniu1)'
+)
+@click.option(
     '--api-url',
-    envvar='MAILCOW_API_URL',
+    envvar=_envvar('MAILCOW_API_URL'),
     required=True,
     help='Mailcow server URL (env: MAILCOW_API_URL)'
 )
 @click.option(
     '--api-key',
-    envvar='MAILCOW_API_KEY',
+    envvar=_envvar('MAILCOW_API_KEY'),
     required=True,
     help='Mailcow API key (env: MAILCOW_API_KEY)'
 )
@@ -434,9 +463,9 @@ def jobs_get(ctx, output, include_log):
 
 @jobs.command('add')
 @click.option('--file', '-f', 'csv_file', type=click.Path(exists=True), help='CSV file for batch mode (columns: user1,password1,username)')
-@click.option('--host1', envvar='MAILCOW_SRC_HOST', required=True, help='Source IMAP host (env: MAILCOW_SRC_HOST)')
-@click.option('--port1', envvar='MAILCOW_SRC_PORT', default='993', help='Source IMAP port (default: 993)')
-@click.option('--enc1', envvar='MAILCOW_SRC_ENC', default='SSL', type=click.Choice(['SSL', 'TLS', 'PLAIN'], case_sensitive=False), help='Encryption type (default: SSL)')
+@click.option('--host1', envvar=_envvar('MAILCOW_SRC_HOST'), required=True, help='Source IMAP host (env: MAILCOW_SRC_HOST)')
+@click.option('--port1', envvar=_envvar('MAILCOW_SRC_PORT'), default='993', help='Source IMAP port (default: 993)')
+@click.option('--enc1', envvar=_envvar('MAILCOW_SRC_ENC'), default='SSL', type=click.Choice(['SSL', 'TLS', 'PLAIN'], case_sensitive=False), help='Encryption type (default: SSL)')
 @click.option('--user1', default=None, help='Source mailbox username/email (required without -f)')
 @click.option('--password1', default=None, help='Source mailbox password (required without -f)')
 @click.option('--username', default=None, help='Destination mailbox in Mailcow (required without -f)')
@@ -721,7 +750,7 @@ def mailbox_get(ctx, output, domain):
 
 @mailbox.command('add')
 @click.option('--file', '-f', 'csv_file', type=click.Path(exists=True), help='CSV file for batch mode (columns: local_part,name or local_part,name,password)')
-@click.option('--domain', '-d', envvar='MAILCOW_DOMAIN', required=True, help='Domain for the mailbox (env: MAILCOW_DOMAIN)')
+@click.option('--domain', '-d', envvar=_envvar('MAILCOW_DOMAIN'), required=True, help='Domain for the mailbox (env: MAILCOW_DOMAIN)')
 @click.option('--local-part', default=None, help='Local part of email (required without -f)')
 @click.option('--name', default='', help='Full name of user')
 @click.option('--password', default=None, help='Password (required without -f, or use --gen-password)')
@@ -1256,4 +1285,19 @@ def alias_update(ctx, alias_id, address, goto, active, sogo_visible):
 
 
 if __name__ == '__main__':
+    # Load environment variables from a .env file in the project directory when
+    # the script is executed directly. This avoids loading .env during test
+    # imports which could make required env-var tests pass unexpectedly.
+    #
+    # Use MAILCOW_ENV_FILE to specify a different .env file:
+    #   MAILCOW_ENV_FILE=.env.domeniu1 python mailcow_cli.py
+    # Default is .env
+    try:
+        from dotenv import load_dotenv
+        env_file = os.environ.get('MAILCOW_ENV_FILE', '.env')
+        env_path = os.path.join(os.path.dirname(__file__), env_file)
+        load_dotenv(dotenv_path=env_path, override=False)
+    except Exception:
+        pass
+
     cli()
