@@ -14,6 +14,9 @@ Usage:
     python mailcow_cli.py alias add --address alias@example.com --goto user@example.com
     python mailcow_cli.py alias add -f aliases.csv
     python mailcow_cli.py alias update 123 --goto newdest@example.com
+    python mailcow_cli.py transport get
+    python mailcow_cli.py transport add --destination example.com --nexthop [smtp.relay.com]:587
+    python mailcow_cli.py transport delete 5
     python mailcow_cli.py --api-url https://mail.example.com --api-key "KEY" jobs get
 
 Supported environment variables (global):
@@ -333,6 +336,59 @@ class MailcowClient:
                 payload['attr'][k] = str(v) if not isinstance(v, str) else v
 
         return self._request("POST", "edit/alias", payload)
+
+    def get_transports(self) -> list:
+        """
+        Get all transport maps.
+
+        API: GET /api/v1/get/transport/all
+        """
+        return self._request("GET", "get/transport/all")
+
+    def add_transport(self, destination: str, nexthop: str,
+                      username: str = '', password: str = '',
+                      active: str = '1', **kwargs) -> dict:
+        """
+        Create a new transport map.
+
+        API: POST /api/v1/add/transport
+
+        Required:
+            destination: destination domain/pattern (e.g., example.com or .example.com)
+            nexthop: next hop server (e.g., [smtp.relay.com]:587)
+
+        Optional:
+            username: SMTP auth username
+            password: SMTP auth password
+            active: 1 = active, 0 = inactive
+        """
+        payload = {
+            'destination': destination,
+            'nexthop': nexthop,
+            'username': username,
+            'password': password,
+            'active': active,
+        }
+
+        for k, v in kwargs.items():
+            if v is not None:
+                payload[k] = str(v) if not isinstance(v, str) else v
+
+        return self._request("POST", "add/transport", payload)
+
+    def delete_transport(self, transport_ids: list) -> dict:
+        """
+        Delete transport map(s).
+
+        API: POST /api/v1/delete/transport
+
+        Required:
+            transport_ids: list of transport IDs to delete
+        """
+        if not isinstance(transport_ids, list):
+            transport_ids = [transport_ids]
+
+        return self._request("POST", "delete/transport", transport_ids)
 
 
 class Context:
@@ -782,8 +838,25 @@ def mailbox_add(ctx, csv_file, domain, local_part, name, password, gen_password,
     import string
 
     def generate_password(length=16):
-        alphabet = string.ascii_letters + string.digits + '!@#$%&*'
-        return ''.join(secrets.choice(alphabet) for _ in range(length))
+        """Generate a password with at least one lowercase, uppercase, digit, and special char."""
+        lowercase = string.ascii_lowercase
+        uppercase = string.ascii_uppercase
+        digits = string.digits
+        special = '!@#$%&*'
+        alphabet = lowercase + uppercase + digits + special
+
+        # Ensure at least one character from each required category
+        password = [
+            secrets.choice(lowercase),
+            secrets.choice(uppercase),
+            secrets.choice(digits),
+            secrets.choice(special),
+        ]
+        # Fill the rest with random characters from the full alphabet
+        password += [secrets.choice(alphabet) for _ in range(length - 4)]
+        # Shuffle to randomize the position of required characters
+        secrets.SystemRandom().shuffle(password)
+        return ''.join(password)
 
     def name_from_local_part(lp):
         """Generate full name from local_part: prenume.nume -> Prenume Nume"""
@@ -1282,6 +1355,259 @@ def alias_update(ctx, alias_id, address, goto, active, sogo_visible):
             click.echo(f"  {k}: {v}")
     else:
         click.echo(f"Failed to update alias {alias_id}: {msg}", err=True)
+
+
+@cli.group()
+def transport():
+    """Manage transport maps.
+
+    Transport maps define how mail for specific destinations
+    should be routed (e.g., to a relay server).
+    """
+    pass
+
+
+@transport.command('get')
+@click.option(
+    '--output', '-o',
+    type=click.Choice(['table', 'json', 'csv']),
+    default='table',
+    help='Output format (default: table)'
+)
+@pass_context
+def transport_get(ctx, output):
+    """List all transport maps.
+
+    API: GET /api/v1/get/transport/all
+    """
+    transports = ctx.client.get_transports()
+
+    if not transports:
+        click.echo("No transport maps found.")
+        return
+
+    if output == 'json':
+        click.echo(json.dumps(transports, indent=2, ensure_ascii=False))
+    elif output == 'csv':
+        click.echo('id,destination,nexthop,username,active')
+        for t in transports:
+            click.echo(f"{t.get('id', '')},{t.get('destination', '')},{t.get('nexthop', '')},{t.get('username', '')},{t.get('active', '0')}")
+    else:
+        max_col = 30
+
+        def trunc(s, length=max_col):
+            s = str(s) if s else ''
+            return s[:length-2] + '..' if len(s) > length else s
+
+        headers = ['ID', 'Destination', 'Nexthop', 'Username', 'Active']
+        rows = []
+        for t in transports:
+            rows.append([
+                trunc(str(t.get('id', 'N/A')), 6),
+                trunc(t.get('destination', '')),
+                trunc(t.get('nexthop', '')),
+                trunc(t.get('username', '') or '-'),
+                '✓' if str(t.get('active', '0')) == '1' else '✗'
+            ])
+
+        widths = [min(max_col, max(len(h), max((len(r[i]) for r in rows), default=0))) for i, h in enumerate(headers)]
+
+        header_line = ' '.join(h.ljust(widths[i]) for i, h in enumerate(headers))
+        click.echo(header_line)
+        click.echo('-' * len(header_line))
+
+        for row in rows:
+            click.echo(' '.join(str(col).ljust(widths[i]) for i, col in enumerate(row)))
+
+        click.echo(f"\nTotal: {len(transports)} transport map(s)")
+
+
+@transport.command('add')
+@click.option('--file', '-f', 'csv_file', type=click.Path(exists=True), help='CSV file for batch mode (columns: destination,nexthop[,username,password])')
+@click.option('--destination', default=None, help='Destination domain/pattern (e.g., example.com)')
+@click.option('--nexthop', default=None, help='Next hop server (e.g., [smtp.relay.com]:587)')
+@click.option('--username', default='', help='SMTP auth username (optional)')
+@click.option('--password', default='', help='SMTP auth password (optional)')
+@click.option('--active/--no-active', default=True, help='Activate transport (default: yes)')
+@click.option('--preview', is_flag=True, help='Show what would be created without making API call')
+@click.option('--output', '-o', type=click.Choice(['table', 'json', 'csv']), default='table', help='Output format for preview (default: table)')
+@pass_context
+def transport_add(ctx, csv_file, destination, nexthop, username, password, active, preview, output):
+    """Add transport map(s).
+
+    \b
+    Single mode:
+        transport add --destination example.com --nexthop [smtp.relay.com]:587
+
+    \b
+    Batch mode:
+        transport add -f transports.csv
+        CSV format: destination,nexthop[,username,password]
+
+    API: POST /api/v1/add/transport
+    """
+    def output_json(rows, headers):
+        data = [dict(zip([h.lower() for h in headers], row)) for row in rows]
+        click.echo(json.dumps(data, indent=2, ensure_ascii=False))
+
+    def output_table(rows, headers):
+        max_col = 35
+        def trunc(s, length=max_col):
+            s = str(s) if s else ''
+            return s[:length-2] + '..' if len(s) > length else s
+
+        display_rows = [[trunc(col) for col in row] for row in rows]
+        widths = [max(len(h), max((len(r[i]) for r in display_rows), default=0)) for i, h in enumerate(headers)]
+
+        click.echo(' '.join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+        click.echo('-' * sum(widths) + '-' * (len(widths) - 1))
+        for row in display_rows:
+            click.echo(' '.join(str(col).ljust(widths[i]) for i, col in enumerate(row)))
+
+    def output_csv(rows, headers):
+        click.echo(','.join(headers))
+        for row in rows:
+            click.echo(','.join(str(col) for col in row))
+
+    def create_transport(dest, nh, user='', passwd=''):
+        return ctx.client.add_transport(
+            destination=dest,
+            nexthop=nh,
+            username=user,
+            password=passwd,
+            active='1' if active else '0',
+        )
+
+    # Batch mode
+    if csv_file:
+        success_count = 0
+        error_count = 0
+        preview_items = []
+        created_items = []
+
+        with open(csv_file, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.reader(f)
+
+            for row_num, row in enumerate(reader, 1):
+                if not row or all(not cell.strip() for cell in row):
+                    continue
+
+                # Skip header row
+                if row_num == 1 and row[0].lower() in ('destination', 'dest', 'domain'):
+                    continue
+
+                if len(row) < 2:
+                    click.echo(f"Row {row_num}: Skipping - need at least 2 columns (destination,nexthop)", err=True)
+                    error_count += 1
+                    continue
+
+                dest = row[0].strip()
+                nh = row[1].strip()
+                user = row[2].strip() if len(row) > 2 else ''
+                passwd = row[3].strip() if len(row) > 3 else ''
+
+                if not dest or not nh:
+                    click.echo(f"Row {row_num}: Skipping - empty destination or nexthop", err=True)
+                    error_count += 1
+                    continue
+
+                if preview:
+                    preview_items.append((dest, nh, user or '-'))
+                    success_count += 1
+                    continue
+
+                try:
+                    result = create_transport(dest, nh, user, passwd)
+                    success, msg = ctx.client._check_response(result)
+                    if success:
+                        click.echo(f"Created: {dest} -> {nh}")
+                        created_items.append((dest, nh, user or '-'))
+                        success_count += 1
+                    else:
+                        click.echo(f"Error for {dest}: {msg}", err=True)
+                        error_count += 1
+                except Exception as e:
+                    click.echo(f"Error for {dest}: {e}", err=True)
+                    error_count += 1
+
+        # Output preview results
+        if preview and preview_items:
+            headers = ['Destination', 'Nexthop', 'Username']
+            if output == 'json':
+                output_json(preview_items, headers)
+            elif output == 'csv':
+                output_csv(preview_items, headers)
+            else:
+                output_table(preview_items, headers)
+                click.echo(f"\nTotal: {success_count} transport map(s) to create")
+            return
+
+        click.echo(f"\nCompleted: {success_count} created, {error_count} errors")
+
+    # Single mode
+    else:
+        if not destination or not nexthop:
+            raise click.UsageError("Single mode requires --destination and --nexthop (or use -f for batch)")
+
+        if preview:
+            click.echo(f"[PREVIEW] Would create transport map:")
+            click.echo(f"  Destination: {destination}")
+            click.echo(f"  Nexthop: {nexthop}")
+            if username:
+                click.echo(f"  Username: {username}")
+            click.echo(f"  Active: {active}")
+            return
+
+        result = create_transport(destination, nexthop, username, password)
+        success, msg = ctx.client._check_response(result)
+
+        if success:
+            click.echo(f"Success: Transport map created")
+            click.echo(f"  Destination: {destination}")
+            click.echo(f"  Nexthop: {nexthop}")
+            if username:
+                click.echo(f"  Username: {username}")
+        else:
+            click.echo(f"Failed to create transport map: {msg}", err=True)
+
+
+@transport.command('delete')
+@click.argument('transport_ids', nargs=-1, required=True)
+@click.option('--force', '-y', is_flag=True, help='Skip confirmation prompt')
+@pass_context
+def transport_delete(ctx, transport_ids, force):
+    """Delete transport map(s).
+
+    \b
+    Usage:
+        transport delete ID [ID ...]
+
+    \b
+    Examples:
+        transport delete 5
+        transport delete 5 6 7
+        transport delete 5 -y  (skip confirmation)
+
+    API: POST /api/v1/delete/transport
+    """
+    if not transport_ids:
+        raise click.UsageError("At least one transport ID is required")
+
+    ids_list = list(transport_ids)
+
+    if not force:
+        click.echo(f"About to delete {len(ids_list)} transport map(s): {', '.join(ids_list)}")
+        if not click.confirm("Continue?"):
+            click.echo("Aborted.")
+            return
+
+    result = ctx.client.delete_transport(ids_list)
+    success, msg = ctx.client._check_response(result)
+
+    if success:
+        click.echo(f"Success: Deleted {len(ids_list)} transport map(s)")
+    else:
+        click.echo(f"Failed to delete transport map(s): {msg}", err=True)
 
 
 if __name__ == '__main__':
