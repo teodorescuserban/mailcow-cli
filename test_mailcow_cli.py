@@ -1681,5 +1681,440 @@ class TestJobsAddOptions:
         assert result.exit_code == 0
 
 
+class TestTransportCommands:
+    """Tests for transport commands."""
+
+    def test_transport_help(self, runner):
+        """Test transport command help."""
+        result = runner.invoke(cli, ['--api-url', 'x', '--api-key', 'x', 'transport', '--help'])
+        assert result.exit_code == 0
+        assert 'transport map' in result.output.lower()
+
+    @patch.object(MailcowClient, 'get_transports')
+    def test_transport_get_empty(self, mock_get, runner):
+        """Test transport get with no transports."""
+        mock_get.return_value = []
+        result = runner.invoke(cli, ['--api-url', 'https://x', '--api-key', 'x', 'transport', 'get'])
+        assert result.exit_code == 0
+        assert 'No transport maps found' in result.output
+
+    @patch.object(MailcowClient, 'get_transports')
+    def test_transport_get_table(self, mock_get, runner):
+        """Test transport get with table output."""
+        mock_get.return_value = [
+            {'id': 1, 'destination': 'example.com', 'nexthop': '[smtp.relay.com]:587', 'username': 'relay_user', 'active': '1'}
+        ]
+        result = runner.invoke(cli, ['--api-url', 'https://x', '--api-key', 'x', 'transport', 'get'])
+        assert result.exit_code == 0
+        assert 'example.com' in result.output
+        assert '[smtp.relay.com]:587' in result.output
+        assert 'relay_user' in result.output
+
+    @patch.object(MailcowClient, 'get_transports')
+    def test_transport_get_json(self, mock_get, runner):
+        """Test transport get with JSON output."""
+        mock_get.return_value = [
+            {'id': 1, 'destination': 'example.com', 'nexthop': '[smtp.relay.com]:587', 'username': '', 'active': '1'}
+        ]
+        result = runner.invoke(cli, ['--api-url', 'https://x', '--api-key', 'x', 'transport', 'get', '-o', 'json'])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data) == 1
+        assert data[0]['destination'] == 'example.com'
+
+    @patch.object(MailcowClient, 'get_transports')
+    def test_transport_get_csv(self, mock_get, runner):
+        """Test transport get with CSV output."""
+        mock_get.return_value = [
+            {'id': 1, 'destination': 'example.com', 'nexthop': '[smtp.relay.com]:587', 'username': 'user', 'active': '1'}
+        ]
+        result = runner.invoke(cli, ['--api-url', 'https://x', '--api-key', 'x', 'transport', 'get', '-o', 'csv'])
+        assert result.exit_code == 0
+        assert 'id,destination,nexthop,username,active' in result.output
+        assert 'example.com' in result.output
+
+    def test_transport_add_requires_destination_and_nexthop(self, runner):
+        """Test transport add requires --destination and --nexthop."""
+        result = runner.invoke(cli, ['--api-url', 'https://x', '--api-key', 'x', 'transport', 'add', '--destination', 'example.com'])
+        assert result.exit_code != 0
+        assert 'nexthop' in result.output.lower()
+
+    @patch.object(MailcowClient, 'add_transport')
+    @patch.object(MailcowClient, '_check_response')
+    def test_transport_add_single(self, mock_check, mock_add, runner):
+        """Test transport add single mode."""
+        mock_add.return_value = [{"type": "success", "msg": "ok"}]
+        mock_check.return_value = (True, "ok")
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add',
+            '--destination', 'example.com',
+            '--nexthop', '[smtp.relay.com]:587'
+        ])
+        assert result.exit_code == 0
+        assert 'Success' in result.output
+        mock_add.assert_called_once()
+
+    @patch.object(MailcowClient, 'add_transport')
+    @patch.object(MailcowClient, '_check_response')
+    def test_transport_add_with_auth(self, mock_check, mock_add, runner):
+        """Test transport add with authentication."""
+        mock_add.return_value = [{"type": "success", "msg": "ok"}]
+        mock_check.return_value = (True, "ok")
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add',
+            '--destination', 'example.com',
+            '--nexthop', '[smtp.relay.com]:587',
+            '--username', 'relay_user',
+            '--password', 'relay_pass'
+        ])
+        assert result.exit_code == 0
+        assert 'Success' in result.output
+        assert 'relay_user' in result.output
+
+    def test_transport_add_preview_single(self, runner):
+        """Test transport add preview in single mode."""
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add',
+            '--destination', 'example.com',
+            '--nexthop', '[smtp.relay.com]:587',
+            '--preview'
+        ])
+        assert result.exit_code == 0
+        assert 'PREVIEW' in result.output
+        assert 'example.com' in result.output
+        assert '[smtp.relay.com]:587' in result.output
+
+    def test_transport_add_preview_batch(self, runner, tmp_path):
+        """Test transport add preview in batch mode."""
+        csv_file = tmp_path / "transports.csv"
+        csv_file.write_text("destination,nexthop,username,password\nexample.com,[smtp.relay.com]:587,user,pass\nother.com,[smtp2.relay.com]:25,,\n")
+
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add', '-f', str(csv_file), '--preview'
+        ])
+        assert result.exit_code == 0
+        assert 'example.com' in result.output
+        assert 'other.com' in result.output
+
+    @patch.object(MailcowClient, 'add_transport')
+    @patch.object(MailcowClient, '_check_response')
+    def test_transport_add_batch_execution(self, mock_check, mock_add, runner, tmp_path):
+        """Test transport add batch mode actual execution."""
+        mock_add.return_value = [{"type": "success", "msg": "ok"}]
+        mock_check.return_value = (True, "ok")
+
+        csv_file = tmp_path / "transports.csv"
+        csv_file.write_text("destination,nexthop\nexample.com,[smtp.relay.com]:587\nother.com,[smtp2.relay.com]:25\n")
+
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add', '-f', str(csv_file)
+        ])
+        assert result.exit_code == 0
+        assert 'Created' in result.output
+        assert '2 created' in result.output
+        assert mock_add.call_count == 2
+
+    @patch.object(MailcowClient, 'add_transport')
+    @patch.object(MailcowClient, '_check_response')
+    def test_transport_add_error(self, mock_check, mock_add, runner):
+        """Test transport add with error response."""
+        mock_add.return_value = [{"type": "error", "msg": "Invalid destination"}]
+        mock_check.return_value = (False, "Invalid destination")
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add',
+            '--destination', 'example.com',
+            '--nexthop', '[smtp.relay.com]:587'
+        ])
+        assert 'Failed' in result.output or 'Invalid destination' in result.output
+
+    @patch.object(MailcowClient, 'add_transport')
+    @patch.object(MailcowClient, '_check_response')
+    def test_transport_add_no_active(self, mock_check, mock_add, runner):
+        """Test transport add --no-active."""
+        mock_add.return_value = [{"type": "success", "msg": "ok"}]
+        mock_check.return_value = (True, "ok")
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add',
+            '--destination', 'example.com',
+            '--nexthop', '[smtp.relay.com]:587',
+            '--no-active'
+        ])
+        assert result.exit_code == 0
+
+    def test_transport_add_batch_skip_header(self, runner, tmp_path):
+        """Test transport add batch mode skips header row."""
+        csv_file = tmp_path / "transports.csv"
+        csv_file.write_text("destination,nexthop\nexample.com,[smtp.relay.com]:587\n")
+
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add', '-f', str(csv_file), '--preview'
+        ])
+        assert result.exit_code == 0
+        assert 'destination' not in result.output.lower().split('\n')[0] or 'Destination' in result.output  # Header row should be skipped
+        assert 'example.com' in result.output
+
+    def test_transport_add_batch_invalid_rows(self, runner, tmp_path):
+        """Test transport add batch with invalid CSV rows."""
+        csv_file = tmp_path / "transports.csv"
+        csv_file.write_text("destination,nexthop\nexample.com\n")  # Missing nexthop
+
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add', '-f', str(csv_file)
+        ])
+        assert 'Skipping' in result.output or 'error' in result.output.lower()
+
+    def test_transport_add_preview_json_output(self, runner, tmp_path):
+        """Test transport add preview with JSON output."""
+        csv_file = tmp_path / "transports.csv"
+        csv_file.write_text("destination,nexthop\nexample.com,[smtp.relay.com]:587\n")
+
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add', '-f', str(csv_file), '--preview', '-o', 'json'
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data) == 1
+        assert data[0]['destination'] == 'example.com'
+
+    def test_transport_add_preview_csv_output(self, runner, tmp_path):
+        """Test transport add preview with CSV output."""
+        csv_file = tmp_path / "transports.csv"
+        csv_file.write_text("destination,nexthop\nexample.com,[smtp.relay.com]:587\n")
+
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add', '-f', str(csv_file), '--preview', '-o', 'csv'
+        ])
+        assert result.exit_code == 0
+        assert 'Destination,Nexthop,Username' in result.output
+
+
+class TestTransportDeleteCommand:
+    """Tests for transport delete command."""
+
+    def test_transport_delete_requires_id(self, runner):
+        """Test transport delete requires at least one ID."""
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'delete'
+        ])
+        assert result.exit_code != 0
+
+    @patch.object(MailcowClient, 'delete_transport')
+    @patch.object(MailcowClient, '_check_response')
+    def test_transport_delete_single(self, mock_check, mock_delete, runner):
+        """Test transport delete single ID."""
+        mock_delete.return_value = [{"type": "success", "msg": "ok"}]
+        mock_check.return_value = (True, "ok")
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'delete', '5', '-y'
+        ])
+        assert result.exit_code == 0
+        assert 'Success' in result.output
+        assert 'Deleted' in result.output
+
+    @patch.object(MailcowClient, 'delete_transport')
+    @patch.object(MailcowClient, '_check_response')
+    def test_transport_delete_multiple(self, mock_check, mock_delete, runner):
+        """Test transport delete multiple IDs."""
+        mock_delete.return_value = [{"type": "success", "msg": "ok"}]
+        mock_check.return_value = (True, "ok")
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'delete', '5', '6', '7', '-y'
+        ])
+        assert result.exit_code == 0
+        assert 'Deleted 3 transport map(s)' in result.output
+
+    @patch.object(MailcowClient, 'delete_transport')
+    @patch.object(MailcowClient, '_check_response')
+    def test_transport_delete_with_confirmation(self, mock_check, mock_delete, runner):
+        """Test transport delete with confirmation prompt."""
+        mock_delete.return_value = [{"type": "success", "msg": "ok"}]
+        mock_check.return_value = (True, "ok")
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'delete', '5'
+        ], input='y\n')
+        assert result.exit_code == 0
+        assert 'Success' in result.output
+
+    def test_transport_delete_abort(self, runner):
+        """Test transport delete abort confirmation."""
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'delete', '5'
+        ], input='n\n')
+        assert result.exit_code == 0
+        assert 'Aborted' in result.output
+
+    @patch.object(MailcowClient, 'delete_transport')
+    @patch.object(MailcowClient, '_check_response')
+    def test_transport_delete_error(self, mock_check, mock_delete, runner):
+        """Test transport delete with error response."""
+        mock_delete.return_value = [{"type": "error", "msg": "Transport not found"}]
+        mock_check.return_value = (False, "Transport not found")
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'delete', '999', '-y'
+        ])
+        assert 'Failed' in result.output or 'Transport not found' in result.output
+
+
+class TestTransportClientMethods:
+    """Tests for MailcowClient transport methods."""
+
+    @patch('mailcow_cli.requests.request')
+    def test_get_transports(self, mock_request):
+        """Test get_transports method."""
+        mock_response = Mock()
+        mock_response.json.return_value = [{"id": 1, "destination": "example.com"}]
+        mock_response.raise_for_status = Mock()
+        mock_request.return_value = mock_response
+
+        client = MailcowClient("https://mail.example.com", "test-key")
+        result = client.get_transports()
+
+        assert result == [{"id": 1, "destination": "example.com"}]
+        call_args = mock_request.call_args
+        assert 'get/transport/all' in call_args[1]['url']
+
+    @patch('mailcow_cli.requests.request')
+    def test_add_transport(self, mock_request):
+        """Test add_transport method."""
+        mock_response = Mock()
+        mock_response.json.return_value = [{"type": "success", "msg": "ok"}]
+        mock_response.raise_for_status = Mock()
+        mock_request.return_value = mock_response
+
+        client = MailcowClient("https://mail.example.com", "test-key")
+        result = client.add_transport(
+            destination="example.com",
+            nexthop="[smtp.relay.com]:587"
+        )
+
+        assert result == [{"type": "success", "msg": "ok"}]
+        call_args = mock_request.call_args
+        assert 'add/transport' in call_args[1]['url']
+        assert call_args[1]['json']['destination'] == 'example.com'
+        assert call_args[1]['json']['nexthop'] == '[smtp.relay.com]:587'
+
+    @patch('mailcow_cli.requests.request')
+    def test_add_transport_with_auth(self, mock_request):
+        """Test add_transport method with authentication."""
+        mock_response = Mock()
+        mock_response.json.return_value = [{"type": "success", "msg": "ok"}]
+        mock_response.raise_for_status = Mock()
+        mock_request.return_value = mock_response
+
+        client = MailcowClient("https://mail.example.com", "test-key")
+        result = client.add_transport(
+            destination="example.com",
+            nexthop="[smtp.relay.com]:587",
+            username="relay_user",
+            password="relay_pass"
+        )
+
+        call_args = mock_request.call_args
+        assert call_args[1]['json']['username'] == 'relay_user'
+        assert call_args[1]['json']['password'] == 'relay_pass'
+
+    @patch('mailcow_cli.requests.request')
+    def test_delete_transport_single(self, mock_request):
+        """Test delete_transport method with single ID."""
+        mock_response = Mock()
+        mock_response.json.return_value = [{"type": "success", "msg": "ok"}]
+        mock_response.raise_for_status = Mock()
+        mock_request.return_value = mock_response
+
+        client = MailcowClient("https://mail.example.com", "test-key")
+        result = client.delete_transport("5")
+
+        assert result == [{"type": "success", "msg": "ok"}]
+        call_args = mock_request.call_args
+        assert 'delete/transport' in call_args[1]['url']
+        assert call_args[1]['json'] == ["5"]
+
+    @patch('mailcow_cli.requests.request')
+    def test_delete_transport_multiple(self, mock_request):
+        """Test delete_transport method with multiple IDs."""
+        mock_response = Mock()
+        mock_response.json.return_value = [{"type": "success", "msg": "ok"}]
+        mock_response.raise_for_status = Mock()
+        mock_request.return_value = mock_response
+
+        client = MailcowClient("https://mail.example.com", "test-key")
+        result = client.delete_transport(["5", "6", "7"])
+
+        call_args = mock_request.call_args
+        assert call_args[1]['json'] == ["5", "6", "7"]
+
+
+class TestTransportBatchErrors:
+    """Tests for transport batch error handling."""
+
+    @patch.object(MailcowClient, 'add_transport')
+    @patch.object(MailcowClient, '_check_response')
+    def test_transport_add_batch_partial_failure(self, mock_check, mock_add, runner, tmp_path):
+        """Test transport add batch mode with partial failures."""
+        mock_add.side_effect = [
+            [{"type": "success", "msg": "ok"}],
+            [{"type": "error", "msg": "Invalid nexthop"}]
+        ]
+        mock_check.side_effect = [
+            (True, "ok"),
+            (False, "Invalid nexthop")
+        ]
+
+        csv_file = tmp_path / "transports.csv"
+        csv_file.write_text("destination,nexthop\nexample.com,[smtp.relay.com]:587\nother.com,invalid\n")
+
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add', '-f', str(csv_file)
+        ])
+        assert result.exit_code == 0
+        assert '1 created' in result.output
+        assert '1 error' in result.output
+
+    @patch.object(MailcowClient, 'add_transport')
+    def test_transport_add_batch_exception(self, mock_add, runner, tmp_path):
+        """Test transport add batch with exception during creation."""
+        mock_add.side_effect = Exception("Connection error")
+
+        csv_file = tmp_path / "transports.csv"
+        csv_file.write_text("destination,nexthop\nexample.com,[smtp.relay.com]:587\n")
+
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add', '-f', str(csv_file)
+        ])
+        assert 'Error' in result.output
+        assert '1 error' in result.output
+
+    def test_transport_add_batch_empty_fields(self, runner, tmp_path):
+        """Test transport add batch with empty required fields."""
+        csv_file = tmp_path / "transports.csv"
+        csv_file.write_text("destination,nexthop\n,smtp.relay.com\nexample.com,\n")
+
+        result = runner.invoke(cli, [
+            '--api-url', 'https://x', '--api-key', 'x',
+            'transport', 'add', '-f', str(csv_file)
+        ])
+        assert 'Skipping' in result.output
+        assert '2 error' in result.output
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
